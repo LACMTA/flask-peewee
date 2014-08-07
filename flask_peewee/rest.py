@@ -386,7 +386,6 @@ class RestResource(object):
                 setattr(instance, k, rel_resource.save_object(rel_obj, v))
 
     def create(self):
-        print type(request.data)
         if request.data != "":
             data = request.data
             data = json.loads( data )
@@ -406,11 +405,16 @@ class RestResource(object):
         return self.response(self.serialize_object(instance))
 
     def edit(self, obj):
-        data = request.data or request.form.get('data') or ''
-        try:
-            data = json.loads(data)
-        except ValueError:
-            return self.response_bad_request()
+        if request.data != "":
+            data = request.data
+            data = json.loads( data )
+            
+        if request.form.get('data') is not None:
+            data = request.form.get('data')
+            data = json.loads( data )
+            
+        if request.form.to_dict() is not None:
+            data = request.form.to_dict()
 
         obj, models = self.deserialize_object(data, obj)
 
