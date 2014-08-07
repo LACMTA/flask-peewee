@@ -5,24 +5,13 @@ try:
 except ImportError:
     import json
 
-from flask import Blueprint
-from flask import Response
-from flask import abort
-from flask import g
-from flask import redirect
-from flask import request
-from flask import session
-from flask import url_for
+from flask import Blueprint, abort, request, Response, session, redirect, url_for, g
 from peewee import *
 from peewee import DJANGO_MAP
 
 from flask_peewee.filters import make_field_tree
-from flask_peewee.serializer import Deserializer
-from flask_peewee.serializer import Serializer
-from flask_peewee.utils import PaginatedQuery
-from flask_peewee.utils import get_object_or_404
-from flask_peewee.utils import slugify
-from flask_peewee._compat import reduce
+from flask_peewee.serializer import Serializer, Deserializer
+from flask_peewee.utils import PaginatedQuery, slugify, get_object_or_404
 
 
 class Authentication(object):
@@ -42,7 +31,7 @@ class Authentication(object):
 class APIKeyAuthentication(Authentication):
     """
     Requires a model that has at least two fields, "key" and "secret", which will
-    be searched for when authing a request.
+    be searched for when authing a request
     """
     key_field = 'key'
     secret_field = 'secret'
@@ -65,21 +54,14 @@ class APIKeyAuthentication(Authentication):
         except self.model.DoesNotExist:
             pass
 
-    def get_key_secret(self):
-        for search in [request.args, request.headers, request.form]:
-            if 'key' in search and 'secret' in search:
-                return search['key'], search['secret']
-        return None, None
-
     def authorize(self):
         g.api_key = None
 
         if request.method not in self.protected_methods:
             return True
 
-        key, secret = self.get_key_secret()
-        if key or secret:
-            g.api_key = self.get_key(key, secret)
+        if 'key' in request.args and 'secret' in request.args:
+            g.api_key = self.get_key(request.args['key'], request.args['secret'])
 
         return g.api_key
 
@@ -192,12 +174,6 @@ class RestResource(object):
 
         # clean and normalize the request parameters
         for key in request.args:
-            orig_key = key
-            if key.startswith('-'):
-                negated = True
-                key = key[1:]
-            else:
-                negated = False
             if '__' in key:
                 expr, op = key.rsplit('__', 1)
                 if op not in DJANGO_MAP:
@@ -207,7 +183,7 @@ class RestResource(object):
                 expr = key
                 op = 'eq'
             raw_filters.setdefault(expr, [])
-            raw_filters[expr].append((op, request.args.getlist(orig_key), negated))
+            raw_filters[expr].append((op, request.args.getlist(key)))
 
         # do a breadth first search across the field tree created by filter_fields,
         # searching for matching keys in the request parameters -- when found,
@@ -218,28 +194,22 @@ class RestResource(object):
             for field in node.fields:
                 filter_expr = '%s%s' % (prefix, field.name)
                 if filter_expr in raw_filters:
-                    for op, arg_list, negated in raw_filters[filter_expr]:
-                        query = self.apply_filter(query, filter_expr, op, arg_list, negated)
+                    for op, arg_list in raw_filters[filter_expr]:
+                        query = self.apply_filter(query, filter_expr, op, arg_list)
 
             for child_prefix, child_node in node.children.items():
                 queue.append((child_node, prefix + child_prefix + '__'))
 
         return query
 
-    def apply_filter(self, query, expr, op, arg_list, negated):
+    def apply_filter(self, query, expr, op, arg_list):
         query_expr = '%s__%s' % (expr, op)
-        constructor = lambda kwargs: negated and ~DQ(**kwargs) or DQ(**kwargs)
         if op == 'in':
-            # in gives us a string format list '1,2,3,4'
-            # we have to turn it into a list before passing to
-            # the filter.
-            arg_list = [i.strip() for i in arg_list[0].split(',')]
-            return query.filter(constructor({query_expr: arg_list}))
+            return query.filter(**{query_expr: arg_list})
         elif len(arg_list) == 1:
-            return query.filter(constructor({query_expr: arg_list[0]}))
+            return query.filter(**{query_expr: arg_list[0]})
         else:
-            query_clauses = [
-                constructor({query_expr: val}) for val in arg_list]
+            query_clauses = [DQ(**{query_expr: val}) for val in arg_list]
             return query.filter(reduce(operator.or_, query_clauses))
 
     def get_serializer(self):
@@ -415,26 +385,30 @@ class RestResource(object):
                 rel_resource.save_related_objects(rel_obj, v)
                 setattr(instance, k, rel_resource.save_object(rel_obj, v))
 
-    def read_request_data(self):
-        data = request.data or request.form.get('data') or ''
-        return json.loads(data.decode('utf8'))
-
     def create(self):
-        try:
-            data = self.read_request_data()
-        except ValueError:
-            return self.response_bad_request()
+        print type(request.data)
+        if request.data != "":
+            data = request.data
+            data = json.loads( data )
+            
+        if request.form.get('data') is not None:
+            data = request.form.get('data')
+            data = json.loads( data )
+            
+        if request.form.to_dict() is not None:
+            data = request.form.to_dict()
 
-        obj, models = self.deserialize_object(data, self.model())
+        instance, models = self.deserialize_object(data, self.model())
 
-        self.save_related_objects(obj, data)
-        obj = self.save_object(obj, data)
+        self.save_related_objects(instance, data)
+        instance = self.save_object(instance, data)
 
-        return self.response(self.serialize_object(obj))
+        return self.response(self.serialize_object(instance))
 
     def edit(self, obj):
+        data = request.data or request.form.get('data') or ''
         try:
-            data = self.read_request_data()
+            data = json.loads(data)
         except ValueError:
             return self.response_bad_request()
 
